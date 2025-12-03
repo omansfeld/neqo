@@ -135,7 +135,15 @@ impl Cubic {
     ///
     /// For implementation reasons neqo uses a dividend and divisor approach with `usize` typing to
     /// construct `CUBIC_BETA = 0.7`.
-    pub const BETA_USIZE_DIVIDEND: usize = 7;
+    pub const BETA_USIZE_DIVIDEND: usize = 70;
+
+    /// As per RFC 8511 it makes sense to have a different decrease factor for ECN-CE congestion
+    /// events than for loss induced congestion events.
+    ///
+    /// > CUBIC connections benefit from beta_{ecn} of 0.85.
+    ///
+    /// <https://www.rfc-editor.org/rfc/rfc8511.html#section-3.1>
+    pub const BETA_USIZE_DIVIDEND_ECN: usize = 85;
 
     /// > CUBIC multiplicative decrease factor
     ///
@@ -152,7 +160,7 @@ impl Cubic {
     ///
     /// For implementation reasons neqo uses a dividend and divisor approach with `usize` typing to
     /// construct `CUBIC_BETA = 0.7`
-    pub const BETA_USIZE_DIVISOR: usize = 10;
+    pub const BETA_USIZE_DIVISOR: usize = 100;
 
     /// This is the factor that is used by fast convergence to further reduce the next `W_max` when
     /// a congestion event occurs while `cwnd < W_max`. This speeds up the bandwidth release for
@@ -385,6 +393,7 @@ impl WindowAdjustment for Cubic {
         curr_cwnd: usize,
         acked_bytes: usize,
         max_datagram_size: usize,
+        ecn: bool,
     ) -> (usize, usize) {
         let curr_cwnd_f64 = convert_to_f64(curr_cwnd);
         // Fast Convergence
@@ -411,10 +420,17 @@ impl WindowAdjustment for Cubic {
 
         // Reducing the congestion window and resetting time
         self.t_epoch = None;
-        (
-            curr_cwnd * Self::BETA_USIZE_DIVIDEND / Self::BETA_USIZE_DIVISOR,
-            acked_bytes * Self::BETA_USIZE_DIVIDEND / Self::BETA_USIZE_DIVISOR,
-        )
+        if ecn {
+            (
+                curr_cwnd * Self::BETA_USIZE_DIVIDEND_ECN / Self::BETA_USIZE_DIVISOR,
+                acked_bytes * Self::BETA_USIZE_DIVIDEND_ECN / Self::BETA_USIZE_DIVISOR,
+            )
+        } else {
+            (
+                curr_cwnd * Self::BETA_USIZE_DIVIDEND / Self::BETA_USIZE_DIVISOR,
+                acked_bytes * Self::BETA_USIZE_DIVIDEND / Self::BETA_USIZE_DIVISOR,
+            )
+        }
     }
 
     fn on_app_limited(&mut self) {
