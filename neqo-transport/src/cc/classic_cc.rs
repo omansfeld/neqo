@@ -1532,6 +1532,89 @@ mod tests {
         assert!(cc.maybe_lost_packets.is_empty());
     }
 
+    #[test]
+    fn spurious_no_double_detection_in_recovery() {
+        // Test that losses during recovery don't cause double-counting of spurious events.
+        // Scenario:
+        // 1. Send packets 1,2
+        // 2. Lose packet 1 → congestion event #1
+        // 3. Send packet 3 → enter Recovery state
+        // 4. Late ack packet 1 → spurious event #1 detected
+        // 5. Lose packet 2 → NO congestion event (still in recovery)
+        // 6. Ack packet 2 → should NOT trigger spurious event #2
+
+        let mut cc = ClassicCongestionControl::new(NewReno::default(), Pmtud::new(IP_ADDR, MTU));
+        let now = now();
+        let mut cc_stats = CongestionControlStats::default();
+        let rtt_estimate = RttEstimate::new(RTT);
+
+        // Step 1: Send packets 1,2
+        let pkt1 = sent::make_packet(1, now, 1000);
+        let pkt2 = sent::make_packet(2, now, 1000);
+
+        cc.on_packet_sent(&pkt1, now);
+        cc.on_packet_sent(&pkt2, now);
+
+        assert_eq!(cc.state, State::SlowStart);
+        assert_eq!(cc_stats.congestion_events[CongestionEvent::Loss], 0);
+        assert_eq!(cc_stats.congestion_events[CongestionEvent::Spurious], 0);
+
+        let mut lost_pkt1 = pkt1.clone();
+        lost_pkt1.declare_lost(now);
+
+        // Step 2: Lose packet 1 → congestion event #1
+        cc.on_packets_lost(
+            Some(now),
+            None,
+            rtt_estimate.pto(true),
+            &[lost_pkt1],
+            now,
+            &mut cc_stats,
+        );
+
+        assert_eq!(cc.state, State::RecoveryStart);
+        assert_eq!(cc_stats.congestion_events[CongestionEvent::Loss], 1);
+        assert_eq!(cc_stats.congestion_events[CongestionEvent::Spurious], 0);
+
+        // Step 3: Send packet 3 → enter Recovery state
+        let pkt3 = sent::make_packet(3, now, 1000);
+        cc.on_packet_sent(&pkt3, now);
+        assert_eq!(cc.state, State::Recovery);
+
+        // Step 4: Ack packet 1 → spurious event #1 detected
+        cc.on_packets_acked(&[pkt1], &rtt_estimate, now, &mut cc_stats);
+
+        assert_eq!(cc_stats.congestion_events[CongestionEvent::Loss], 1);
+        assert_eq!(cc_stats.congestion_events[CongestionEvent::Spurious], 1);
+
+        let mut lost_pkt2 = pkt2.clone();
+        lost_pkt2.declare_lost(now);
+
+        // Step 5. Lose packet 2 → NO congestion event (still in recovery)
+        cc.on_packets_lost(
+            Some(now),
+            None,
+            rtt_estimate.pto(true),
+            &[lost_pkt2],
+            now,
+            &mut cc_stats,
+        );
+
+        // Still only 1 loss event (no new event triggered)
+        assert_eq!(cc_stats.congestion_events[CongestionEvent::Loss], 1);
+        assert_eq!(cc_stats.congestion_events[CongestionEvent::Spurious], 1);
+
+        // 6. Ack packet 2 → should NOT trigger spurious event #2
+        // BUG (before fix): This would trigger spurious event #2
+        // CORRECT (after fix): Should NOT trigger spurious event because packet 2 never caused a
+        // congestion event
+        cc.on_packets_acked(&[pkt2], &rtt_estimate, now, &mut cc_stats);
+
+        // Should still be only 1 loss event and 1 spurious event
+        assert_eq!(cc_stats.congestion_events[CongestionEvent::Loss], 1);
+        assert_eq!(cc_stats.congestion_events[CongestionEvent::Spurious], 1,);
+    }
+
     fn slow_start_exit_stats(congestion_event: CongestionEvent) {
         let mut cc = ClassicCongestionControl::new(NewReno::default(), Pmtud::new(IP_ADDR, MTU));
         let now = now();
