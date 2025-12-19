@@ -319,13 +319,6 @@ impl<T: WindowAdjustment> CongestionControl for ClassicCongestionControl<T> {
                 // were sent before the rebinding.
                 self.bytes_in_flight = self.bytes_in_flight.saturating_sub(pkt.len());
             }
-            let present = self.maybe_lost_packets.insert(
-                (pkt.pn(), pkt.packet_type()),
-                MaybeLostPacket {
-                    time_sent: pkt.time_sent(),
-                },
-            );
-            debug_assert!(present.is_none());
         }
 
         qlog::metrics_updated(
@@ -334,14 +327,14 @@ impl<T: WindowAdjustment> CongestionControl for ClassicCongestionControl<T> {
             now,
         );
 
-        let mut lost_packets = lost_packets
+        let mut lost_packets_iter = lost_packets
             .iter()
             .filter(|pkt| !pkt.is_pmtud_probe())
             .rev()
             .peekable();
 
         // Lost PMTUD probes do not elicit a congestion control reaction.
-        let Some(last_lost_packet) = lost_packets.peek() else {
+        let Some(last_lost_packet) = lost_packets_iter.peek() else {
             return false;
         };
 
@@ -351,9 +344,30 @@ impl<T: WindowAdjustment> CongestionControl for ClassicCongestionControl<T> {
             first_rtt_sample_time,
             prev_largest_acked_sent,
             pto,
-            lost_packets.rev(),
+            lost_packets_iter.rev(),
             now,
         );
+
+        // only count packets that actually caused a congestion event and that are not pmtud probes
+        if congestion {
+            for pkt in lost_packets.iter().filter(|pkt| !pkt.is_pmtud_probe()) {
+                let present = self.maybe_lost_packets.insert(
+                    (pkt.pn(), pkt.packet_type()),
+                    MaybeLostPacket {
+                        time_sent: pkt.time_sent(),
+                    },
+                );
+                qtrace!(
+                    "SPURIOUS: added maybe_lost_packet: pn {}, type {:?}, pmtud {}, time_sent {:?}",
+                    pkt.pn(),
+                    pkt.packet_type(),
+                    pkt.is_pmtud_probe(),
+                    pkt.time_sent()
+                );
+                debug_assert!(present.is_none());
+            }
+        }
+
         qdebug!(
             "on_packets_lost this={self:p}, bytes_in_flight={}, cwnd={}, state={:?}",
             self.bytes_in_flight,
@@ -402,6 +416,7 @@ impl<T: WindowAdjustment> CongestionControl for ClassicCongestionControl<T> {
         // Record the recovery time and exit any transient state.
         if self.state.transient() {
             self.recovery_start = Some(pkt.pn());
+            qtrace!("SPURIOUS: sent recovery_start packet with pn {}", pkt.pn());
             self.state.update();
         }
 
@@ -526,13 +541,27 @@ impl<T: WindowAdjustment> ClassicCongestionControl<T> {
 
         // Removes all newly acked packets that are late acks from `maybe_lost_packets`.
         for acked_packet in acked_packets {
-            self.maybe_lost_packets
-                .remove(&(acked_packet.pn(), acked_packet.packet_type()));
+            if self
+                .maybe_lost_packets
+                .remove(&(acked_packet.pn(), acked_packet.packet_type()))
+                .is_some()
+            {
+                qtrace!(
+                    "SPURIOUS: removed maybe_lost_packet with pn {}, type {:?}, pmtud {}",
+                    acked_packet.pn(),
+                    acked_packet.packet_type(),
+                    acked_packet.is_pmtud_probe()
+                );
+            }
         }
 
         // If all of them have been removed we detected a spurious congestion event.
         if self.maybe_lost_packets.is_empty() {
             cc_stats.congestion_events[CongestionEvent::Spurious] += 1;
+            qtrace!(
+                "SPURIOUS: all maybe_lost_packets removed - spurious event detected, now at {}",
+                cc_stats.congestion_events[CongestionEvent::Spurious]
+            );
             // TODO: Implement spurious congestion event handling: <https://github.com/mozilla/neqo/issues/2694>
         }
     }
@@ -543,8 +572,16 @@ impl<T: WindowAdjustment> ClassicCongestionControl<T> {
         // The `pto * 2` maximum age of the lost packets is taken from msquic's implementation:
         // <https://github.com/microsoft/msquic/blob/2623c07df62b4bd171f469fb29c2714b6735b676/src/core/loss_detection.c#L939-L943>
         let max_age = pto * 2;
-        self.maybe_lost_packets
-            .retain(|_, packet| now.saturating_duration_since(packet.time_sent) <= max_age);
+        self.maybe_lost_packets.retain(|(pn, pt), packet| {
+            let keep = now.saturating_duration_since(packet.time_sent) <= max_age;
+            if !keep {
+                qtrace!(
+                    "SPURIOUS: cleaned up maybe_lost_packet with pn {pn}, pt {:?}",
+                    pt
+                );
+            }
+            keep
+        });
     }
 
     fn detect_persistent_congestion<'a>(
@@ -629,6 +666,11 @@ impl<T: WindowAdjustment> ClassicCongestionControl<T> {
         // Start a new congestion event if lost or ECN CE marked packet was sent
         // after the start of the previous congestion recovery period.
         if !self.after_recovery_start(last_packet) {
+            qtrace!(
+                "SPURIOUS: on_congestion_event called in recovery, abort! last_packet {}, recovery_start {}",
+                last_packet.pn(),
+                self.recovery_start.unwrap_or(0)
+            );
             return false;
         }
 
@@ -648,6 +690,12 @@ impl<T: WindowAdjustment> ClassicCongestionControl<T> {
         );
 
         cc_stats.congestion_events[congestion_event] += 1;
+        if congestion_event == CongestionEvent::Loss {
+            qtrace!(
+                "SPURIOUS: loss congestion event recorded, now at {}",
+                cc_stats.congestion_events[congestion_event]
+            );
+        }
         cc_stats.slow_start_exited |= self.state.in_slow_start();
 
         qlog::metrics_updated(
