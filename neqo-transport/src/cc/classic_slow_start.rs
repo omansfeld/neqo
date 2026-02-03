@@ -9,7 +9,11 @@ use std::{
     fmt::{self, Display},
 };
 
-use crate::cc::classic_cc::{SlowStart, SlowStartResult};
+use crate::{
+    cc::classic_cc::{SlowStart, SlowStartResult},
+    packet,
+    rtt::RttEstimate,
+};
 
 /// Classic slow start as described in RFC 9002.
 ///
@@ -28,12 +32,17 @@ impl Display for ClassicSlowStart {
 }
 
 impl SlowStart for ClassicSlowStart {
+    fn on_packet_sent(&mut self, _sent_pn: packet::Number) {}
+
     fn on_packets_acked(
         &mut self,
         curr_cwnd: usize,
         ssthresh: usize,
         acked_bytes: usize,
         new_acked: usize,
+        _rtt_est: &RttEstimate,
+        _max_datagram_size: usize,
+        _largest_acked: packet::Number,
     ) -> SlowStartResult {
         debug_assert!(
             ssthresh >= curr_cwnd,

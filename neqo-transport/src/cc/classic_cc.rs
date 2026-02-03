@@ -118,6 +118,7 @@ pub struct SlowStartResult {
 /// Implementations define how the congestion window grows during the slow start phase and if and
 /// when slow start exits without a congestion event.
 pub trait SlowStart: Display + Debug {
+    fn on_packet_sent(&mut self, sent_pn: packet::Number);
     /// Handle packets being acknowledged during slow start.
     ///
     /// Returns (`cwnd_increase`, `unused_acked_bytes`, `exit_slow_start`)
@@ -127,6 +128,9 @@ pub trait SlowStart: Display + Debug {
         ssthresh: usize,
         acked_bytes: usize,
         new_acked: usize,
+        rtt_est: &RttEstimate,
+        max_datagram_size: usize,
+        largest_acked: packet::Number,
     ) -> SlowStartResult;
 }
 
@@ -250,6 +254,8 @@ where
     ) {
         let mut is_app_limited = true;
         let mut new_acked = 0;
+        // TODO: this shouldn't just unwrap
+        let largest_packet_acked = acked_pkts.first().unwrap();
 
         // Supplying `true` for `rtt_est.pto(true)` here is best effort not to have to track
         // `recovery::Loss::confirmed()` all the way down to the congestion controller. Having too
@@ -303,11 +309,16 @@ where
                 self.current.ssthresh,
                 self.current.acked_bytes,
                 new_acked,
+                rtt_est,
+                self.max_datagram_size(),
+                largest_packet_acked.pn(),
             );
             self.current.congestion_window += result.cwnd_increase;
             self.current.acked_bytes = result.unused_acked_bytes;
             qdebug!("[{self}] slow start += {}", result.cwnd_increase);
             if result.exit_slow_start {
+                qinfo!("Exited slow start by algorithm");
+                self.current.ssthresh = self.current.congestion_window;
                 self.set_phase(Phase::CongestionAvoidance, now);
             }
         }
@@ -465,6 +476,8 @@ where
     }
 
     fn on_packet_sent(&mut self, pkt: &sent::Packet, now: Instant) {
+        self.ss_algorithm.on_packet_sent(pkt.pn());
+
         // Record the recovery time and exit any transient phase.
         if self.current.phase.transient() {
             self.current.recovery_start = Some(pkt.pn());

@@ -5,42 +5,184 @@
 // except according to those terms.
 
 use std::{
-    cmp::min,
-    fmt::{self, Display},
+    cmp::{max, min},
+    time::Duration,
+    usize,
 };
 
-use crate::cc::classic_cc::{SlowStart, SlowStartResult};
+use neqo_common::qinfo;
 
-/// `HyStart` placeholder, this is just 2x'ing the classic slow start growth for testing purposes
-/// currently
-#[derive(Debug, Default)]
-pub struct HyStart {}
+use crate::{
+    cc::classic_cc::{SlowStart, SlowStartResult},
+    packet,
+    rtt::RttEstimate,
+};
 
-impl Display for HyStart {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "HyStart")
+#[derive(Debug, Default, derive_more::Display)]
+#[display("State [last_min: {last_round_min_rtt:?}, current_min: {current_round_min_rtt:?}, samples: {rtt_sample_count}, end: {window_end:?}, css: {css_baseline_min_rtt:?}")]
+pub struct State {
+    last_round_min_rtt: Duration,
+    current_round_min_rtt: Duration,
+    rtt_sample_count: usize,
+    window_end: Option<packet::Number>,
+    css_baseline_min_rtt: Duration,
+    css_round_count: usize,
+}
+
+impl State {
+    pub const fn new() -> Self {
+        Self {
+            last_round_min_rtt: Duration::MAX,
+            current_round_min_rtt: Duration::MAX,
+            rtt_sample_count: 0,
+            window_end: None,
+            css_baseline_min_rtt: Duration::MAX,
+            css_round_count: 0,
+        }
+    }
+}
+
+#[derive(Debug, Default, derive_more::Display)]
+#[display("HyStart++")]
+pub struct HyStart {
+    limit: usize,
+    current: State,
+}
+
+impl HyStart {
+    const MIN_RTT_THRESH: Duration = Duration::from_millis(4);
+
+    const MAX_RTT_THRESH: Duration = Duration::from_millis(16);
+
+    const MIN_RTT_DIVISOR: u32 = 8;
+
+    const N_RTT_SAMPLE: usize = 8;
+
+    const CSS_GROWTH_DIVISOR: usize = 4;
+
+    const CSS_ROUNDS: usize = 5;
+
+    pub const fn new(pacing: bool) -> Self {
+        let limit = if pacing { usize::MAX } else { 8 };
+        Self {
+            limit,
+            current: State::new(),
+        }
+    }
+
+    fn in_css(&self) -> bool {
+        self.current.css_baseline_min_rtt != Duration::MAX
+    }
+
+    fn collect_rtt_sample(&mut self, rtt: Duration) {
+        self.current.current_round_min_rtt = min(self.current.current_round_min_rtt, rtt);
+        self.current.rtt_sample_count += 1;
+    }
+
+    const fn maybe_exit_css(&mut self) -> bool {
+        self.current.css_round_count += 1;
+        self.current.css_round_count >= Self::CSS_ROUNDS
+    }
+
+    fn calc_cwnd_increase(
+        &self,
+        acked_bytes: usize,
+        new_acked: usize,
+        max_datagram_size: usize,
+        css: bool,
+    ) -> (usize, usize) {
+        let mut cwnd_increase = min(
+            self.limit
+                .checked_mul(max_datagram_size)
+                .unwrap_or(usize::MAX),
+            acked_bytes + new_acked,
+        );
+
+        if css {
+            cwnd_increase /= Self::CSS_GROWTH_DIVISOR;
+        }
+        (cwnd_increase, acked_bytes + new_acked - cwnd_increase)
+    }
+
+    const fn enough_samples(&self) -> bool {
+        self.current.rtt_sample_count >= Self::N_RTT_SAMPLE
+    }
+
+    fn maybe_start_new_round(&mut self, sent_pn: packet::Number) {
+        if self.current.window_end.is_some() {
+            return;
+        }
+        self.current.window_end = Some(sent_pn);
+        self.current.last_round_min_rtt = self.current.current_round_min_rtt;
+        self.current.current_round_min_rtt = Duration::MAX;
+        self.current.rtt_sample_count = 0;
+        qinfo!("started new round");
     }
 }
 
 impl SlowStart for HyStart {
+    fn on_packet_sent(&mut self, sent_pn: packet::Number) {
+        self.maybe_start_new_round(sent_pn);
+    }
+
     fn on_packets_acked(
         &mut self,
         curr_cwnd: usize,
         ssthresh: usize,
         acked_bytes: usize,
         new_acked: usize,
+        rtt_est: &RttEstimate,
+        max_datagram_size: usize,
+        largest_acked: packet::Number,
     ) -> SlowStartResult {
         debug_assert!(
             ssthresh >= curr_cwnd,
             "ssthresh {ssthresh} < curr_cwnd {curr_cwnd} while in slow start --> invalid state"
         );
+        let mut exit_slow_start = false;
+        let (cwnd_increase, unused_acked_bytes) =
+            self.calc_cwnd_increase(acked_bytes, new_acked, max_datagram_size, self.in_css());
 
-        let cwnd_increase = min(ssthresh - curr_cwnd, 2 * (acked_bytes + new_acked));
-        let unused_acked_bytes = (acked_bytes + new_acked).saturating_sub(cwnd_increase);
+        self.collect_rtt_sample(rtt_est.latest());
 
-        // This doesn't look like it is necessary, but it can happen
-        // after persistent congestion.
-        let exit_slow_start = curr_cwnd + cwnd_increase == ssthresh;
+        if self.in_css() {
+            // in CSS falling below baseline indicates that the exit was spurious
+            if self.enough_samples()
+                && self.current.current_round_min_rtt < self.current.css_baseline_min_rtt
+            {
+                // this takes us out of CSS again
+                qinfo!("exiting CSS after {} rounds", self.current.css_round_count);
+                self.current.css_baseline_min_rtt = Duration::MAX;
+                self.current.css_round_count = 0;
+            }
+        } else if self.enough_samples()
+            && self.current.current_round_min_rtt != Duration::MAX
+            && self.current.last_round_min_rtt != Duration::MAX
+        {
+            let rtt_thresh = max(
+                Self::MIN_RTT_THRESH,
+                min(
+                    self.current.last_round_min_rtt / Self::MIN_RTT_DIVISOR,
+                    Self::MAX_RTT_THRESH,
+                ),
+            );
+
+            if self.current.current_round_min_rtt >= self.current.last_round_min_rtt + rtt_thresh {
+                self.current.css_baseline_min_rtt = self.current.current_round_min_rtt;
+                qinfo!("entered CSS");
+            }
+        }
+
+        // check for end of round
+        if let Some(window_end) = self.current.window_end {
+            if largest_acked >= window_end {
+                self.current.window_end = None;
+
+                if self.in_css() {
+                    exit_slow_start = self.maybe_exit_css();
+                }
+            }
+        }
 
         SlowStartResult {
             cwnd_increase,
