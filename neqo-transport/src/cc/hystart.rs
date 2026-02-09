@@ -18,7 +18,7 @@ use crate::{
     rtt::RttEstimate,
 };
 
-#[derive(Debug, Default, derive_more::Display)]
+#[derive(Debug, Default, Clone, Copy, derive_more::Display)]
 #[display("State [last_min: {last_round_min_rtt:?}, current_min: {current_round_min_rtt:?}, samples: {rtt_sample_count}, end: {window_end:?}, css: {css_baseline_min_rtt:?}")]
 pub struct State {
     last_round_min_rtt: Duration,
@@ -50,20 +50,26 @@ pub struct HyStart {
 }
 
 impl HyStart {
-    const MIN_RTT_THRESH: Duration = Duration::from_millis(4);
+    pub const MIN_RTT_THRESH: Duration = Duration::from_millis(4);
 
-    const MAX_RTT_THRESH: Duration = Duration::from_millis(16);
+    pub const MAX_RTT_THRESH: Duration = Duration::from_millis(16);
 
-    const MIN_RTT_DIVISOR: u32 = 8;
+    pub const MIN_RTT_DIVISOR: u32 = 8;
 
-    const N_RTT_SAMPLE: usize = 8;
+    pub const N_RTT_SAMPLE: usize = 8;
 
-    const CSS_GROWTH_DIVISOR: usize = 4;
+    pub const CSS_GROWTH_DIVISOR: usize = 4;
 
-    const CSS_ROUNDS: usize = 5;
+    pub const CSS_ROUNDS: usize = 5;
+
+    pub const NON_PACED_L: usize = 8;
 
     pub const fn new(pacing: bool) -> Self {
-        let limit = if pacing { usize::MAX } else { 8 };
+        let limit = if pacing {
+            usize::MAX
+        } else {
+            Self::NON_PACED_L
+        };
         Self {
             limit,
             current: State::new(),
@@ -117,6 +123,44 @@ impl HyStart {
         self.current.current_round_min_rtt = Duration::MAX;
         self.current.rtt_sample_count = 0;
         qinfo!("started new round");
+    }
+}
+
+impl HyStart {
+    /// Temporary stub for on_congestion_event (will be added to SlowStart trait)
+    pub fn on_congestion_event(&mut self) {
+        // Reset CSS state
+        self.current.css_baseline_min_rtt = Duration::MAX;
+        self.current.css_round_count = 0;
+        self.current.window_end = None;
+    }
+}
+
+#[cfg(test)]
+impl HyStart {
+    /// Test accessor: Check if currently in CSS phase
+    pub fn in_css(&self) -> bool {
+        self.in_css()
+    }
+
+    /// Test accessor: Get window end packet number
+    pub const fn window_end(&self) -> Option<packet::Number> {
+        self.current.window_end
+    }
+
+    /// Test accessor: Get RTT sample count for current round
+    pub const fn rtt_sample_count(&self) -> usize {
+        self.current.rtt_sample_count
+    }
+
+    /// Test accessor: Get current round minimum RTT
+    pub const fn current_round_min_rtt(&self) -> Duration {
+        self.current.current_round_min_rtt
+    }
+
+    /// Test accessor: Get CSS round count
+    pub const fn css_round_count(&self) -> usize {
+        self.current.css_round_count
     }
 }
 

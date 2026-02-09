@@ -11,11 +11,15 @@ use std::{
 
 use super::{CongestionControlAlgorithm, SlowStartAlgorithm};
 use crate::{
-    cc::{classic_cc::ClassicCongestionControl, cubic::Cubic, new_reno::NewReno, ClassicSlowStart},
+    cc::{
+        classic_cc::ClassicCongestionControl, cubic::Cubic, hystart::HyStart, new_reno::NewReno,
+        ClassicSlowStart,
+    },
     Pmtud,
 };
 
 mod cubic;
+mod hystart;
 mod new_reno;
 
 pub const IP_ADDR: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
@@ -52,4 +56,9 @@ pub fn make_cc_cubic() -> ClassicCongestionControl<ClassicSlowStart, Cubic> {
         Cubic::default(),
         Pmtud::new(IP_ADDR, MTU),
     )
+}
+
+/// Helper to create `ClassicCongestionControl` with HyStart++ for tests.
+pub fn make_cc_hystart(paced: bool) -> ClassicCongestionControl<HyStart, NewReno> {
+    ClassicCongestionControl::new(HyStart::new(paced), NewReno::default(), Pmtud::new(IP_ADDR, MTU))
 }
