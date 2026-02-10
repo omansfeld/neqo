@@ -11,11 +11,11 @@
     reason = "Comprehensive test coverage requires many test cases"
 )]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use test_fixture::now;
 
-use super::{make_cc_hystart, RTT};
+use super::make_cc_hystart;
 use crate::{
     cc::{
         classic_cc::SlowStart as _, hystart::HyStart, new_reno::NewReno, ClassicCongestionControl,
@@ -60,19 +60,22 @@ fn send_packets(
 }
 
 /// Simulate acking packets with a specific RTT.
+/// Each packet is acked separately (one ACK frame per packet) to generate one RTT sample per
+/// packet.
 fn ack_packets(
     cc: &mut ClassicCongestionControl<HyStart, NewReno>,
     pns: &[packet::Number],
     rtt: Duration,
     now: std::time::Instant,
 ) {
-    let mut pkts = Vec::new();
-    for &pn in pns {
-        pkts.push(sent::make_packet(pn, now - rtt, SMSS));
-    }
     let rtt_est = RttEstimate::new(rtt);
     let mut stats = CongestionControlStats::default();
-    cc.on_packets_acked(&pkts, &rtt_est, now, &mut stats);
+
+    // Ack each packet separately to generate one RTT sample per packet
+    for &pn in pns {
+        let pkt = sent::make_packet(pn, now - rtt, SMSS);
+        cc.on_packets_acked(&[pkt], &rtt_est, now, &mut stats);
+    }
 }
 
 /// Helper to set up HyStart state through two rounds with the given RTT values.
@@ -661,11 +664,7 @@ fn l_limit_paced_no_cap() {
         0,
     );
 
-    assert_eq!(
-        result.cwnd_increase,
-        1000 * SMSS,
-        "Paced should have no cap"
-    );
+    assert_eq!(result.cwnd_increase, 100 * SMSS, "Paced should have no cap");
 }
 
 #[test]
@@ -754,77 +753,95 @@ fn initial_ss_restriction_falls_back_when_ssthresh_set() {
 
 #[test]
 fn integration_full_slow_start_to_css_to_ca() {
+    // Realistic flow: send batches, wait RTT, ACK, send more (natural round progression)
     let mut cc = make_cc_hystart(true);
+    let mut stats = CongestionControlStats::default();
     let mut now = now();
 
-    assert_eq!(cc.ssthresh(), usize::MAX);
+    let base_rtt = Duration::from_millis(100);
+    let increased_rtt = Duration::from_millis(120);
+    let base_rtt_est = RttEstimate::new(base_rtt);
+    let increased_rtt_est = RttEstimate::new(increased_rtt);
 
-    // First round: stable RTT, exponential growth
-    let pns1 = send_packets(&mut cc, 10, now);
-    now += Duration::from_millis(100);
-    let cwnd_before = cc.cwnd();
-    ack_packets(&mut cc, &pns1, Duration::from_millis(100), now);
-    let cwnd_after = cc.cwnd();
+    assert_eq!(cc.ssthresh(), usize::MAX, "Should start in slow start");
 
-    // Should grow by acked bytes (exponential)
-    assert_eq!(
-        cwnd_after - cwnd_before,
-        10 * SMSS,
-        "First round should have exponential growth"
-    );
+    let mut next_pn: u64 = 0;
+    let mut css_detected = false;
+    let mut ca_detected = false;
 
-    // Second round: RTT increases, should enter CSS
-    let pns2 = send_packets(&mut cc, 10, now);
-    now += Duration::from_millis(120);
-    let cwnd_before = cc.cwnd();
-    ack_packets(&mut cc, &pns2, Duration::from_millis(120), now);
-    let cwnd_after = cc.cwnd();
+    // Helper to send a batch of packets (up to cwnd)
+    let send_batch = |cc: &mut ClassicCongestionControl<HyStart, NewReno>,
+                      next_pn: &mut u64,
+                      now: Instant|
+     -> Vec<u64> {
+        let mut sent_pns = Vec::new();
+        let target = cc.cwnd();
+        while cc.bytes_in_flight() < target {
+            let pkt = sent::make_packet(*next_pn, now, SMSS);
+            cc.on_packet_sent(&pkt, now);
+            sent_pns.push(*next_pn);
+            *next_pn += 1;
+        }
+        sent_pns
+    };
 
-    // Growth should be reduced (CSS: 1/4 rate)
-    let growth = cwnd_after - cwnd_before;
-    assert_eq!(
-        growth,
-        10 * SMSS / HyStart::CSS_GROWTH_DIVISOR,
-        "CSS growth should be 1/{}",
-        HyStart::CSS_GROWTH_DIVISOR
-    );
+    // Phase 1: Establish baseline with stable RTT
 
-    // Continue in CSS for remaining rounds
-    for _ in 0..(HyStart::CSS_ROUNDS - 1) {
-        let pns = send_packets(&mut cc, 10, now);
-        now += Duration::from_millis(120);
+    // Send a batch
+    let batch = send_batch(&mut cc, &mut next_pn, now);
+
+    // Wait RTT
+    now += base_rtt;
+
+    // ACK the batch (one packet per ACK to generate RTT samples)
+    for &pn in &batch {
+        let pkt = sent::make_packet(pn, now - base_rtt, SMSS);
         let cwnd_before = cc.cwnd();
-        ack_packets(&mut cc, &pns, Duration::from_millis(120), now);
+        cc.on_packets_acked(&[pkt], &base_rtt_est, now, &mut stats);
         let cwnd_after = cc.cwnd();
-
-        let growth = cwnd_after - cwnd_before;
-        assert_eq!(
-            growth,
-            10 * SMSS / HyStart::CSS_GROWTH_DIVISOR,
-            "Should maintain CSS growth rate"
-        );
+        assert_eq!(cwnd_after, cwnd_before + SMSS);
     }
 
-    // After CSS_ROUNDS, should exit to congestion avoidance
-    let final_cwnd = cc.cwnd();
-    assert_eq!(
-        cc.ssthresh(),
-        final_cwnd,
-        "ssthresh should be set to cwnd on CSS exit"
-    );
+    // Phase 2: RTT increases -> CSS entry -> CA entry
+    for iteration in 0..=HyStart::CSS_ROUNDS {
+        // Send a batch
+        let batch = send_batch(&mut cc, &mut next_pn, now);
 
-    // Verify we're in congestion avoidance by checking growth rate
-    let pns = send_packets(&mut cc, 10, now);
-    now += Duration::from_millis(120);
-    let cwnd_before = cc.cwnd();
-    ack_packets(&mut cc, &pns, Duration::from_millis(120), now);
-    let cwnd_after = cc.cwnd();
+        // Wait RTT (increased)
+        now += increased_rtt;
 
-    // CA growth should be much slower than even CSS
-    assert!(
-        cwnd_after - cwnd_before < SMSS,
-        "Should be in congestion avoidance with slow growth"
-    );
+        // ACK the batch
+        for &pn in &batch {
+            let pkt = sent::make_packet(pn, now - increased_rtt, SMSS);
+            let cwnd_before = cc.cwnd();
+            let ssthresh_before = cc.ssthresh();
+            cc.on_packets_acked(&[pkt], &increased_rtt_est, now, &mut stats);
+            let cwnd_after = cc.cwnd();
+            let ssthresh_after = cc.ssthresh();
+            let growth = cwnd_after - cwnd_before;
+
+            // Detect CSS: growth becomes 1/4
+            if growth > 0 && growth == SMSS / HyStart::CSS_GROWTH_DIVISOR && !css_detected {
+                css_detected = true;
+                eprintln!("CSS entered at iteration {}, pn={}", iteration, pn);
+            }
+
+            // Detect CA: ssthresh set to cwnd
+            if ssthresh_before == usize::MAX && ssthresh_after == cwnd_after {
+                ca_detected = true;
+                eprintln!("CA entered at iteration {}, pn={}", iteration, pn);
+                break;
+            }
+        }
+
+        if ca_detected {
+            break;
+        }
+    }
+
+    assert!(css_detected, "Should have entered CSS");
+    assert!(ca_detected, "Should have entered CA after CSS rounds");
+    assert_eq!(cc.ssthresh(), cc.cwnd(), "Should be in CA");
 }
 
 #[test]

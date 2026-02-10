@@ -118,6 +118,7 @@ impl HyStart {
         if self.current.window_end.is_some() {
             return;
         }
+        eprintln!("DEBUG: Starting new round at pn={}, prev_min_rtt={:?}", sent_pn, self.current.current_round_min_rtt);
         self.current.window_end = Some(sent_pn);
         self.current.last_round_min_rtt = self.current.current_round_min_rtt;
         self.current.current_round_min_rtt = Duration::MAX;
@@ -170,7 +171,13 @@ impl SlowStart for HyStart {
             "ssthresh {ssthresh} < curr_cwnd {curr_cwnd} while in slow start --> invalid state"
         );
 
+        eprintln!("DEBUG: on_packets_acked: pn={}, rtt={:?}, samples={}, in_css={}, window_end={:?}",
+                  largest_acked, rtt_est.latest(), self.current.rtt_sample_count, self.in_css(), self.current.window_end);
+
         self.collect_rtt_sample(rtt_est.latest());
+
+        eprintln!("DEBUG: After collect: samples={}, cur_min={:?}, last_min={:?}",
+                  self.current.rtt_sample_count, self.current.current_round_min_rtt, self.current.last_round_min_rtt);
 
         if self.in_css()
             && self.enough_samples()
@@ -194,10 +201,23 @@ impl SlowStart for HyStart {
                 ),
             );
 
+            eprintln!("DEBUG: CSS check: thresh={:?}, cur={:?}, last={:?}, diff={:?}, need={:?}",
+                      rtt_thresh, self.current.current_round_min_rtt, self.current.last_round_min_rtt,
+                      self.current.current_round_min_rtt.saturating_sub(self.current.last_round_min_rtt),
+                      self.current.last_round_min_rtt + rtt_thresh);
+
             if self.current.current_round_min_rtt >= self.current.last_round_min_rtt + rtt_thresh {
                 self.current.css_baseline_min_rtt = self.current.current_round_min_rtt;
                 qinfo!("entered CSS");
+                eprintln!("DEBUG: *** ENTERED CSS ***");
+            } else {
+                eprintln!("DEBUG: Did NOT enter CSS (RTT increase insufficient)");
             }
+        } else {
+            eprintln!("DEBUG: Skip CSS check: in_css={}, enough={}, cur!=MAX={}, last!=MAX={}",
+                      self.in_css(), self.enough_samples(),
+                      self.current.current_round_min_rtt != Duration::MAX,
+                      self.current.last_round_min_rtt != Duration::MAX);
         }
 
         let mut exit_slow_start = false;
@@ -207,6 +227,7 @@ impl SlowStart for HyStart {
         // check for end of round
         if let Some(window_end) = self.current.window_end {
             if largest_acked >= window_end {
+                eprintln!("DEBUG: Round ended: largest_acked={} >= window_end={}", largest_acked, window_end);
                 self.current.window_end = None;
 
                 if self.in_css() {
