@@ -76,7 +76,7 @@ impl HyStart {
         }
     }
 
-    fn in_css(&self) -> bool {
+    pub fn in_css(&self) -> bool {
         self.current.css_baseline_min_rtt != Duration::MAX
     }
 
@@ -124,40 +124,26 @@ impl HyStart {
         self.current.rtt_sample_count = 0;
         qinfo!("started new round");
     }
-}
 
-impl HyStart {
-    /// Temporary stub for on_congestion_event (will be added to SlowStart trait)
-    pub fn on_congestion_event(&mut self) {
-        // Reset CSS state
-        self.current.css_baseline_min_rtt = Duration::MAX;
-        self.current.css_round_count = 0;
-        self.current.window_end = None;
-    }
-}
-
-#[cfg(test)]
-impl HyStart {
-    /// Test accessor: Check if currently in CSS phase
-    pub fn in_css(&self) -> bool {
-        self.in_css()
-    }
-
+    #[cfg(test)]
     /// Test accessor: Get window end packet number
     pub const fn window_end(&self) -> Option<packet::Number> {
         self.current.window_end
     }
 
+    #[cfg(test)]
     /// Test accessor: Get RTT sample count for current round
     pub const fn rtt_sample_count(&self) -> usize {
         self.current.rtt_sample_count
     }
 
+    #[cfg(test)]
     /// Test accessor: Get current round minimum RTT
     pub const fn current_round_min_rtt(&self) -> Duration {
         self.current.current_round_min_rtt
     }
 
+    #[cfg(test)]
     /// Test accessor: Get CSS round count
     pub const fn css_round_count(&self) -> usize {
         self.current.css_round_count
@@ -183,23 +169,20 @@ impl SlowStart for HyStart {
             ssthresh >= curr_cwnd,
             "ssthresh {ssthresh} < curr_cwnd {curr_cwnd} while in slow start --> invalid state"
         );
-        let mut exit_slow_start = false;
-        let (cwnd_increase, unused_acked_bytes) =
-            self.calc_cwnd_increase(acked_bytes, new_acked, max_datagram_size, self.in_css());
 
         self.collect_rtt_sample(rtt_est.latest());
 
-        if self.in_css() {
-            // in CSS falling below baseline indicates that the exit was spurious
-            if self.enough_samples()
-                && self.current.current_round_min_rtt < self.current.css_baseline_min_rtt
-            {
-                // this takes us out of CSS again
-                qinfo!("exiting CSS after {} rounds", self.current.css_round_count);
-                self.current.css_baseline_min_rtt = Duration::MAX;
-                self.current.css_round_count = 0;
-            }
-        } else if self.enough_samples()
+        if self.in_css()
+            && self.enough_samples()
+            && self.current.current_round_min_rtt < self.current.css_baseline_min_rtt
+        {
+            // this takes us out of CSS again
+            qinfo!("exiting CSS after {} rounds", self.current.css_round_count);
+            self.current.css_baseline_min_rtt = Duration::MAX;
+            self.current.css_round_count = 0;
+        }
+        if !self.in_css()
+            && self.enough_samples()
             && self.current.current_round_min_rtt != Duration::MAX
             && self.current.last_round_min_rtt != Duration::MAX
         {
@@ -216,6 +199,10 @@ impl SlowStart for HyStart {
                 qinfo!("entered CSS");
             }
         }
+
+        let mut exit_slow_start = false;
+        let (cwnd_increase, unused_acked_bytes) =
+            self.calc_cwnd_increase(acked_bytes, new_acked, max_datagram_size, self.in_css());
 
         // check for end of round
         if let Some(window_end) = self.current.window_end {
