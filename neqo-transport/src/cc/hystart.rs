@@ -118,7 +118,6 @@ impl HyStart {
         if self.current.window_end.is_some() {
             return;
         }
-        eprintln!("DEBUG: Starting new round at pn={}, prev_min_rtt={:?}", sent_pn, self.current.current_round_min_rtt);
         self.current.window_end = Some(sent_pn);
         self.current.last_round_min_rtt = self.current.current_round_min_rtt;
         self.current.current_round_min_rtt = Duration::MAX;

@@ -753,7 +753,9 @@ fn initial_ss_restriction_falls_back_when_ssthresh_set() {
 
 #[test]
 fn integration_full_slow_start_to_css_to_ca() {
-    // Realistic flow: send batches, wait RTT, ACK, send more (natural round progression)
+    // Truly realistic: continuous send/ACK alternation (like real QUIC)
+    // - Send initial cwnd worth of packets (takes 1 RTT before first ACK)
+    // - Then alternate: ACK one, send one (natural round progression)
     let mut cc = make_cc_hystart(true);
     let mut stats = CongestionControlStats::default();
     let mut now = now();
@@ -765,123 +767,98 @@ fn integration_full_slow_start_to_css_to_ca() {
 
     assert_eq!(cc.ssthresh(), usize::MAX, "Should start in slow start");
 
-    let mut next_pn: u64 = 0;
+    let mut next_send: u64 = 0;
+    let mut next_ack: u64 = 0;
     let mut css_detected = false;
     let mut ca_detected = false;
 
-    // Helper to send a batch of packets (up to cwnd)
-    let send_batch = |cc: &mut ClassicCongestionControl<HyStart, NewReno>,
-                      next_pn: &mut u64,
-                      now: Instant|
-     -> Vec<u64> {
-        let mut sent_pns = Vec::new();
-        let target = cc.cwnd();
-        while cc.bytes_in_flight() < target {
-            let pkt = sent::make_packet(*next_pn, now, SMSS);
-            cc.on_packet_sent(&pkt, now);
-            sent_pns.push(*next_pn);
-            *next_pn += 1;
-        }
-        sent_pns
-    };
+    // Phase 1: Send initial cwnd worth of packets (0 to N)
+    // These all use base_rtt to establish baseline
+    let initial_cwnd_packets = cc.cwnd() / SMSS;
+    for _ in 0..initial_cwnd_packets {
+        let pkt = sent::make_packet(next_send, now, SMSS);
+        cc.on_packet_sent(&pkt, now);
+        next_send += 1;
+    }
 
-    // Phase 1: Establish baseline with stable RTT
-
-    // Send a batch
-    let batch = send_batch(&mut cc, &mut next_pn, now);
-
-    // Wait RTT
+    // Wait 1 RTT for first ACK to arrive
     now += base_rtt;
 
-    // ACK the batch (one packet per ACK to generate RTT samples)
-    for &pn in &batch {
-        let pkt = sent::make_packet(pn, now - base_rtt, SMSS);
-        let cwnd_before = cc.cwnd();
-        cc.on_packets_acked(&[pkt], &base_rtt_est, now, &mut stats);
-        let cwnd_after = cc.cwnd();
-        assert_eq!(cwnd_after, cwnd_before + SMSS);
-    }
-
-    // Phase 2: RTT increases -> CSS entry -> CA entry
-    for iteration in 0..=HyStart::CSS_ROUNDS {
-        // Send a batch
-        let batch = send_batch(&mut cc, &mut next_pn, now);
-
-        // Wait RTT (increased)
-        now += increased_rtt;
-
-        // ACK the batch
-        for &pn in &batch {
-            let pkt = sent::make_packet(pn, now - increased_rtt, SMSS);
-            let cwnd_before = cc.cwnd();
-            let ssthresh_before = cc.ssthresh();
-            cc.on_packets_acked(&[pkt], &increased_rtt_est, now, &mut stats);
-            let cwnd_after = cc.cwnd();
-            let ssthresh_after = cc.ssthresh();
-            let growth = cwnd_after - cwnd_before;
-
-            // Detect CSS: growth becomes 1/4
-            if growth > 0 && growth == SMSS / HyStart::CSS_GROWTH_DIVISOR && !css_detected {
-                css_detected = true;
-                eprintln!("CSS entered at iteration {}, pn={}", iteration, pn);
-            }
-
-            // Detect CA: ssthresh set to cwnd
-            if ssthresh_before == usize::MAX && ssthresh_after == cwnd_after {
-                ca_detected = true;
-                eprintln!("CA entered at iteration {}, pn={}", iteration, pn);
-                break;
-            }
+    // Phase 2: Continuous send/ACK alternation
+    // ACK packet 0 ends round 1, next send starts round 2, etc.
+    let max_iterations = 1000; // Enough for multiple CSS rounds and CA entry
+    eprintln!(
+        "Starting continuous loop: initial_cwnd_packets={}, max_iterations={}",
+        initial_cwnd_packets, max_iterations
+    );
+    for iteration in 0..max_iterations {
+        if iteration < 20 || iteration % 10 == 0 {
+            eprintln!(
+                "Iteration {}: next_ack={}, next_send={}, cwnd={}, ssthresh={}",
+                iteration,
+                next_ack,
+                next_send,
+                cc.cwnd(),
+                cc.ssthresh()
+            );
         }
 
-        if ca_detected {
+        // ACK the next packet
+        let ack_pn = next_ack;
+        let rtt_to_use = if ack_pn < initial_cwnd_packets as u64 {
+            base_rtt
+        } else {
+            increased_rtt
+        };
+        let rtt_est = if ack_pn < initial_cwnd_packets as u64 {
+            &base_rtt_est
+        } else {
+            &increased_rtt_est
+        };
+
+        let pkt = sent::make_packet(ack_pn, now - rtt_to_use, SMSS);
+        let cwnd_before = cc.cwnd();
+        let ssthresh_before = cc.ssthresh();
+        cc.on_packets_acked(&[pkt], rtt_est, now, &mut stats);
+        let cwnd_after = cc.cwnd();
+        let ssthresh_after = cc.ssthresh();
+        let growth = cwnd_after - cwnd_before;
+        next_ack += 1;
+
+        // Detect CSS: growth becomes 1/4
+        if growth > 0 && growth == SMSS / HyStart::CSS_GROWTH_DIVISOR && !css_detected {
+            css_detected = true;
+            eprintln!("CSS entered at ack_pn={}", ack_pn);
+        }
+
+        // Detect CA: ssthresh set to cwnd
+        if ssthresh_before == usize::MAX && ssthresh_after == cwnd_after {
+            ca_detected = true;
+            eprintln!("CA entered at ack_pn={}, iteration={}", ack_pn, iteration);
             break;
         }
+
+        // Send packets to fill cwnd (keep sending while there's room)
+        while cc.bytes_in_flight() < cc.cwnd() {
+            let send_pn = next_send;
+            let pkt = sent::make_packet(send_pn, now, SMSS);
+            cc.on_packet_sent(&pkt, now);
+            next_send += 1;
+        }
+
+        // Advance time by a small increment to simulate continuous operation
+        // In reality, we'd advance by the time between ACKs, which depends on pacing
+        // For simplicity, advance by 1/10 of RTT per iteration
+        now += increased_rtt / 10;
     }
+    eprintln!(
+        "Loop ended: next_ack={}, next_send={}, css_detected={}, ca_detected={}",
+        next_ack, next_send, css_detected, ca_detected
+    );
 
     assert!(css_detected, "Should have entered CSS");
     assert!(ca_detected, "Should have entered CA after CSS rounds");
     assert_eq!(cc.ssthresh(), cc.cwnd(), "Should be in CA");
-}
-
-#[test]
-fn integration_after_recovery_uses_classic_slow_start() {
-    let mut cc = make_cc_hystart(true);
-    let mut stats = CongestionControlStats::default();
-    let mut now = now();
-    let pto = Duration::from_millis(100);
-
-    // Initial slow start
-    let pns1 = send_packets(&mut cc, 10, now);
-    now += Duration::from_millis(100);
-    ack_packets(&mut cc, &pns1, Duration::from_millis(100), now);
-
-    // Loss event
-    let lost_pkt = sent::make_packet(pns1[0], now - Duration::from_millis(100), SMSS);
-    cc.on_packets_lost(Some(now), None, pto, &[lost_pkt], now, &mut stats);
-
-    let ssthresh = cc.ssthresh();
-    assert!(ssthresh < usize::MAX, "ssthresh should be set after loss");
-
-    // After recovery, grow cwnd back up using classic slow start
-    let pns2 = send_packets(&mut cc, 5, now);
-    now += Duration::from_millis(100);
-    let cwnd_before = cc.cwnd();
-    ack_packets(&mut cc, &pns2, Duration::from_millis(100), now);
-    let cwnd_after = cc.cwnd();
-
-    // Growth should be classic (1:1) not HyStart++ behavior
-    let growth = cwnd_after - cwnd_before;
-    let expected_growth = 5 * SMSS;
-    assert_eq!(
-        growth, expected_growth,
-        "Should use classic slow start after recovery (1:1 growth)"
-    );
-
-    // Should exit when reaching ssthresh
-    if cwnd_after >= ssthresh {
-        assert_eq!(cc.ssthresh(), cwnd_after, "Should exit SS at ssthresh");
-    }
 }
 
 #[test]

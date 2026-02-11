@@ -320,6 +320,7 @@ where
                 qinfo!("Exited slow start by algorithm");
                 self.current.ssthresh = self.current.congestion_window;
                 self.set_phase(Phase::CongestionAvoidance, now);
+                cc_stats.slow_start_exited = true;
             }
         }
         // Congestion avoidance, above the slow start threshold.
