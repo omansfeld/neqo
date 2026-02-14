@@ -631,7 +631,7 @@ fn l_limit_unpaced_capped_at_l_smss() {
 // ============================================================================
 
 #[test]
-fn initial_ss_restriction_falls_back_when_ssthresh_set() {
+fn hystart_only_used_in_initial_slow_start() {
     let mut hystart = make_hystart_paced();
 
     // In initial slow start (ssthresh = usize::MAX), HyStart++ is active
@@ -639,7 +639,7 @@ fn initial_ss_restriction_falls_back_when_ssthresh_set() {
 
     let _result1 = hystart.on_packets_acked(
         10 * SMSS,
-        usize::MAX,
+        usize::MAX, // ssthresh is default
         SMSS,
         &RttEstimate::new(Duration::from_millis(100)),
         SMSS,
@@ -650,7 +650,7 @@ fn initial_ss_restriction_falls_back_when_ssthresh_set() {
     assert_eq!(hystart.rtt_sample_count(), 1);
 
     // Now with ssthresh != usize::MAX, should fall back to classic
-    let result2 = hystart.on_packets_acked(
+    let _result2 = hystart.on_packets_acked(
         10 * SMSS,
         20 * SMSS, // ssthresh set
         SMSS,
@@ -659,8 +659,8 @@ fn initial_ss_restriction_falls_back_when_ssthresh_set() {
         1,
     );
 
-    // Classic slow start: cwnd_increase = new_acked
-    assert_eq!(result2.cwnd_increase, SMSS, "Should use classic slow start");
+    // Should be using classic slow start, so HyStart++ should not be collecting new samples
+    assert_eq!(hystart.rtt_sample_count(), 1);
 
     // Classic slow start: exit when reaching ssthresh
     let result3 = hystart.on_packets_acked(

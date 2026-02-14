@@ -13,7 +13,10 @@ use std::{
 use neqo_common::qinfo;
 
 use crate::{
-    cc::classic_cc::{SlowStart, SlowStartResult},
+    cc::{
+        classic_cc::{SlowStart, SlowStartResult},
+        classic_slow_start::ClassicSlowStart,
+    },
     packet,
     rtt::RttEstimate,
 };
@@ -162,6 +165,20 @@ impl SlowStart for HyStart {
             ssthresh >= curr_cwnd,
             "ssthresh {ssthresh} < curr_cwnd {curr_cwnd} while in slow start --> invalid state"
         );
+
+        // RFC 9406, Section 4.3: Use HyStart++ only for initial slow start
+        // (when ssthresh is at its initial arbitrarily high value). After a
+        // congestion event sets ssthresh, fall back to classic slow start.
+        if ssthresh != usize::MAX {
+            return ClassicSlowStart::default().on_packets_acked(
+                curr_cwnd,
+                ssthresh,
+                new_acked,
+                rtt_est,
+                max_datagram_size,
+                largest_acked,
+            );
+        }
 
         eprintln!(
             "DEBUG: on_packets_acked: pn={}, rtt={:?}, samples={}, in_css={}, window_end={:?}",
