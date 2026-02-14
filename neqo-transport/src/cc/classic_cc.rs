@@ -253,7 +253,9 @@ where
         let mut is_app_limited = true;
         let mut new_acked = 0;
         // TODO: this shouldn't just unwrap
-        let largest_packet_acked = acked_pkts.first().unwrap();
+        let largest_packet_acked = acked_pkts
+            .first()
+            .expect("`acked_pkts.first().is_some()` is checked in `Loss::on_ack_received`");
 
         // Supplying `true` for `rtt_est.pto(true)` here is best effort not to have to track
         // `recovery::Loss::confirmed()` all the way down to the congestion controller. Having too

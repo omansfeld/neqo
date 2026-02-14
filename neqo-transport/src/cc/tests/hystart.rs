@@ -6,22 +6,14 @@
 
 //! HyStart++ (RFC 9406) test suite
 
-#![expect(
-    clippy::too_many_lines,
-    reason = "Comprehensive test coverage requires many test cases"
-)]
-
 use std::time::Duration;
 
+use neqo_common::qdebug;
 use test_fixture::now;
 
 use super::make_cc_hystart;
 use crate::{
-    cc::{
-        classic_cc::SlowStart as _, hystart::HyStart, new_reno::NewReno, ClassicCongestionControl,
-        CongestionControl as _,
-    },
-    packet,
+    cc::{classic_cc::SlowStart as _, hystart::HyStart, CongestionControl as _},
     recovery::sent,
     rtt::RttEstimate,
     stats::CongestionControlStats,
@@ -43,43 +35,8 @@ fn make_hystart_unpaced() -> HyStart {
     HyStart::new(false)
 }
 
-/// Simulate sending packets and return their packet numbers.
-fn send_packets(
-    cc: &mut ClassicCongestionControl<HyStart, NewReno>,
-    count: usize,
-    now: std::time::Instant,
-) -> Vec<packet::Number> {
-    let mut pns = Vec::new();
-    for i in 0..count {
-        let pn = i as u64;
-        let pkt = sent::make_packet(pn, now, SMSS);
-        cc.on_packet_sent(&pkt, now);
-        pns.push(pn);
-    }
-    pns
-}
-
-/// Simulate acking packets with a specific RTT.
-/// Each packet is acked separately (one ACK frame per packet) to generate one RTT sample per
-/// packet.
-fn ack_packets(
-    cc: &mut ClassicCongestionControl<HyStart, NewReno>,
-    pns: &[packet::Number],
-    rtt: Duration,
-    now: std::time::Instant,
-) {
-    let rtt_est = RttEstimate::new(rtt);
-    let mut stats = CongestionControlStats::default();
-
-    // Ack each packet separately to generate one RTT sample per packet
-    for &pn in pns {
-        let pkt = sent::make_packet(pn, now - rtt, SMSS);
-        cc.on_packets_acked(&[pkt], &rtt_est, now, &mut stats);
-    }
-}
-
 /// Helper to set up HyStart state through two rounds with the given RTT values.
-/// Can be used to test CSS entry (when increased_rtt triggers it) or non-entry (when it doesn't).
+/// Can be used to test CSS entry (when `new_rtt` triggers it) or non-entry (when it doesn't).
 fn maybe_enter_css(hystart: &mut HyStart, base_rtt: Duration, new_rtt: Duration) {
     // First round with base RTT
     let window_end = HyStart::N_RTT_SAMPLE as u64;
@@ -119,7 +76,7 @@ fn maybe_enter_css(hystart: &mut HyStart, base_rtt: Duration, new_rtt: Duration)
         );
     }
 
-    assert!(hystart.window_end().is_none())
+    assert!(hystart.window_end().is_none());
 }
 
 // ============================================================================
@@ -252,6 +209,10 @@ fn rtt_sample_collection_tracks_minimum() {
 }
 
 #[test]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "No truncation will happen for values from 1 to 10."
+)]
 fn rtt_sample_count_increments_per_ack() {
     let mut hystart = make_hystart_paced();
     hystart.on_packet_sent(0);
@@ -720,22 +681,7 @@ fn integration_full_slow_start_to_css_to_ca() {
     // Phase 2: Continuous send/ACK alternation
     // ACK packet 0 ends round 1, next send starts round 2, etc.
     let max_iterations = 1000; // Enough for multiple CSS rounds and CA entry
-    eprintln!(
-        "Starting continuous loop: initial_cwnd_packets={}, max_iterations={}",
-        initial_cwnd_packets, max_iterations
-    );
     for iteration in 0..max_iterations {
-        if iteration < 20 || iteration % 10 == 0 {
-            eprintln!(
-                "Iteration {}: next_ack={}, next_send={}, cwnd={}, ssthresh={}",
-                iteration,
-                next_ack,
-                next_send,
-                cc.cwnd(),
-                cc.ssthresh()
-            );
-        }
-
         // ACK the next packet
         let ack_pn = next_ack;
         let rtt_to_use = if ack_pn < initial_cwnd_packets as u64 {
@@ -749,7 +695,7 @@ fn integration_full_slow_start_to_css_to_ca() {
             &increased_rtt_est
         };
 
-        let pkt = sent::make_packet(ack_pn, now - rtt_to_use, SMSS);
+        let pkt = sent::make_packet(ack_pn, now.checked_sub(rtt_to_use).unwrap(), SMSS);
         let cwnd_before = cc.cwnd();
         let ssthresh_before = cc.ssthresh();
         cc.on_packets_acked(&[pkt], rtt_est, now, &mut stats);
@@ -761,13 +707,13 @@ fn integration_full_slow_start_to_css_to_ca() {
         // Detect CSS: growth becomes 1/4
         if growth > 0 && growth == SMSS / HyStart::CSS_GROWTH_DIVISOR && !css_detected {
             css_detected = true;
-            eprintln!("CSS entered at ack_pn={}", ack_pn);
+            qdebug!("CSS entered at ack_pn={ack_pn}, iteration={iteration}");
         }
 
         // Detect CA: ssthresh set to cwnd
         if ssthresh_before == usize::MAX && ssthresh_after == cwnd_after {
             ca_detected = true;
-            eprintln!("CA entered at ack_pn={}, iteration={}", ack_pn, iteration);
+            qdebug!("CA entered at ack_pn={ack_pn}, iteration={iteration}");
             break;
         }
 
@@ -784,10 +730,6 @@ fn integration_full_slow_start_to_css_to_ca() {
         // For simplicity, advance by 1/10 of RTT per iteration
         now += increased_rtt / 10;
     }
-    eprintln!(
-        "Loop ended: next_ack={}, next_send={}, css_detected={}, ca_detected={}",
-        next_ack, next_send, css_detected, ca_detected
-    );
 
     assert!(css_detected, "Should have entered CSS");
     assert!(ca_detected, "Should have entered CA after CSS rounds");

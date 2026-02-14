@@ -7,10 +7,9 @@
 use std::{
     cmp::{max, min},
     time::Duration,
-    usize,
 };
 
-use neqo_common::qinfo;
+use neqo_common::{qdebug, qinfo};
 
 use crate::{
     cc::{
@@ -88,18 +87,13 @@ impl HyStart {
         self.current.rtt_sample_count += 1;
     }
 
-    const fn maybe_exit_css(&mut self) -> bool {
+    const fn maybe_exit_to_ca(&mut self) -> bool {
         self.current.css_round_count += 1;
         self.current.css_round_count >= Self::CSS_ROUNDS
     }
 
     fn calc_cwnd_increase(&self, new_acked: usize, max_datagram_size: usize, css: bool) -> usize {
-        let mut cwnd_increase = min(
-            self.limit
-                .checked_mul(max_datagram_size)
-                .unwrap_or(usize::MAX),
-            new_acked,
-        );
+        let mut cwnd_increase = min(self.limit.saturating_mul(max_datagram_size), new_acked);
 
         if css {
             cwnd_increase /= Self::CSS_GROWTH_DIVISOR;
@@ -119,7 +113,7 @@ impl HyStart {
         self.current.last_round_min_rtt = self.current.current_round_min_rtt;
         self.current.current_round_min_rtt = Duration::MAX;
         self.current.rtt_sample_count = 0;
-        qinfo!("started new round");
+        qdebug!("HyStart: maybe_start_new_round -> started new round");
     }
 
     #[cfg(test)]
@@ -166,10 +160,15 @@ impl SlowStart for HyStart {
             "ssthresh {ssthresh} < curr_cwnd {curr_cwnd} while in slow start --> invalid state"
         );
 
-        // RFC 9406, Section 4.3: Use HyStart++ only for initial slow start
-        // (when ssthresh is at its initial arbitrarily high value). After a
-        // congestion event sets ssthresh, fall back to classic slow start.
+        // > An implementation SHOULD use HyStart++ only for the initial slow start (when the
+        // > ssthresh is at its initial value of arbitrarily high per [RFC5681]) and fall back to
+        // > using standard slow start for the remainder of the connection lifetime. This is
+        // > acceptable because subsequent slow starts will use the discovered ssthresh value to
+        // > exit slow start and avoid the overshoot problem.
+        //
+        // <https://datatracker.ietf.org/doc/html/rfc9406#section-4.3-11>
         if ssthresh != usize::MAX {
+            qdebug!("HyStart: falling back to classic slow start because ssthresh={ssthresh}!=usize::MAX");
             return ClassicSlowStart::default().on_packets_acked(
                 curr_cwnd,
                 ssthresh,
@@ -180,30 +179,30 @@ impl SlowStart for HyStart {
             );
         }
 
-        eprintln!(
-            "DEBUG: on_packets_acked: pn={}, rtt={:?}, samples={}, in_css={}, window_end={:?}",
-            largest_acked,
-            rtt_est.latest(),
-            self.current.rtt_sample_count,
-            self.in_css(),
-            self.current.window_end
-        );
-
         self.collect_rtt_sample(rtt_est.latest());
 
-        eprintln!(
-            "DEBUG: After collect: samples={}, cur_min={:?}, last_min={:?}",
-            self.current.rtt_sample_count,
+        qdebug!(
+            "HyStart: on_packets_acked -> pn={largest_acked}, rtt={:?}, cur_min={:?}, last_min={:?}, samples={}, in_css={}, css_rounds={}, window_end={:?}",
+            rtt_est.latest(),
             self.current.current_round_min_rtt,
-            self.current.last_round_min_rtt
+            self.current.last_round_min_rtt,
+            self.current.rtt_sample_count,
+            self.in_css(),
+            self.current.css_round_count,
+            self.current.window_end
         );
 
         if self.in_css()
             && self.enough_samples()
             && self.current.current_round_min_rtt < self.current.css_baseline_min_rtt
         {
-            // this takes us out of CSS again
-            qinfo!("exiting CSS after {} rounds", self.current.css_round_count);
+            qinfo!(
+                "HyStart: on_packets_acked -> exiting CSS after {} rounds because cur_min={:?} < baseline_min={:?}",
+                self.current.css_round_count,
+                self.current.current_round_min_rtt,
+                self.current.css_baseline_min_rtt
+            );
+
             self.current.css_baseline_min_rtt = Duration::MAX;
             self.current.css_round_count = 0;
         }
@@ -220,32 +219,11 @@ impl SlowStart for HyStart {
                 ),
             );
 
-            eprintln!(
-                "DEBUG: CSS check: thresh={:?}, cur={:?}, last={:?}, diff={:?}, need={:?}",
-                rtt_thresh,
-                self.current.current_round_min_rtt,
-                self.current.last_round_min_rtt,
-                self.current
-                    .current_round_min_rtt
-                    .saturating_sub(self.current.last_round_min_rtt),
-                self.current.last_round_min_rtt + rtt_thresh
-            );
-
             if self.current.current_round_min_rtt >= self.current.last_round_min_rtt + rtt_thresh {
                 self.current.css_baseline_min_rtt = self.current.current_round_min_rtt;
-                qinfo!("entered CSS");
-                eprintln!("DEBUG: *** ENTERED CSS ***");
-            } else {
-                eprintln!("DEBUG: Did NOT enter CSS (RTT increase insufficient)");
+                qinfo!("HyStart: on_packets_acked -> entered CSS because cur_min={:?} >= last_min={:?} + thresh={rtt_thresh:?}",
+                       self.current.current_round_min_rtt, self.current.last_round_min_rtt);
             }
-        } else {
-            eprintln!(
-                "DEBUG: Skip CSS check: in_css={}, enough={}, cur!=MAX={}, last!=MAX={}",
-                self.in_css(),
-                self.enough_samples(),
-                self.current.current_round_min_rtt != Duration::MAX,
-                self.current.last_round_min_rtt != Duration::MAX
-            );
         }
 
         let mut exit_slow_start = false;
@@ -254,14 +232,14 @@ impl SlowStart for HyStart {
         // check for end of round
         if let Some(window_end) = self.current.window_end {
             if largest_acked >= window_end {
-                eprintln!(
-                    "DEBUG: Round ended: largest_acked={} >= window_end={}",
-                    largest_acked, window_end
+                qdebug!(
+                    "HyStart: on_packets_acked -> round ended because largest_acked={largest_acked} >= window_end={window_end}"
                 );
                 self.current.window_end = None;
 
                 if self.in_css() {
-                    exit_slow_start = self.maybe_exit_css();
+                    exit_slow_start = self.maybe_exit_to_ca();
+                    qinfo!("HyStart: on_packets_acked -> exit={exit_slow_start} because css_rounds={} >= {}", self.current.css_round_count, Self::CSS_ROUNDS);
                 }
             }
         }
