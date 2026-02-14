@@ -11,7 +11,7 @@
     reason = "Comprehensive test coverage requires many test cases"
 )]
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use test_fixture::now;
 
@@ -92,7 +92,6 @@ fn maybe_enter_css(hystart: &mut HyStart, base_rtt: Duration, new_rtt: Duration)
         hystart.on_packets_acked(
             10 * SMSS,
             usize::MAX,
-            0,
             SMSS,
             &RttEstimate::new(base_rtt),
             SMSS,
@@ -113,7 +112,6 @@ fn maybe_enter_css(hystart: &mut HyStart, base_rtt: Duration, new_rtt: Duration)
         hystart.on_packets_acked(
             10 * SMSS,
             usize::MAX,
-            0,
             SMSS,
             &RttEstimate::new(new_rtt),
             SMSS,
@@ -158,7 +156,6 @@ fn round_tracking_lifecycle() {
         hystart.on_packets_acked(
             10 * SMSS,
             usize::MAX,
-            0,
             SMSS,
             &RttEstimate::new(Duration::from_millis(100)),
             SMSS,
@@ -175,7 +172,6 @@ fn round_tracking_lifecycle() {
     hystart.on_packets_acked(
         10 * SMSS,
         usize::MAX,
-        0,
         SMSS,
         &RttEstimate::new(Duration::from_millis(100)),
         SMSS,
@@ -210,7 +206,6 @@ fn rtt_sample_collection_tracks_minimum() {
     hystart.on_packets_acked(
         10 * SMSS,
         usize::MAX,
-        0,
         SMSS,
         &RttEstimate::new(Duration::from_millis(100)),
         SMSS,
@@ -227,7 +222,6 @@ fn rtt_sample_collection_tracks_minimum() {
     hystart.on_packets_acked(
         10 * SMSS,
         usize::MAX,
-        0,
         SMSS,
         &RttEstimate::new(Duration::from_millis(80)),
         SMSS,
@@ -244,7 +238,6 @@ fn rtt_sample_collection_tracks_minimum() {
     hystart.on_packets_acked(
         10 * SMSS,
         usize::MAX,
-        0,
         SMSS,
         &RttEstimate::new(Duration::from_millis(120)),
         SMSS,
@@ -269,7 +262,6 @@ fn rtt_sample_count_increments_per_ack() {
         hystart.on_packets_acked(
             10 * SMSS,
             usize::MAX,
-            0,
             SMSS,
             &RttEstimate::new(Duration::from_millis(100)),
             SMSS,
@@ -295,7 +287,6 @@ fn css_entry_not_triggered_with_insufficient_samples() {
         hystart.on_packets_acked(
             10 * SMSS,
             usize::MAX,
-            0,
             SMSS,
             &RttEstimate::new(Duration::from_millis(100)),
             SMSS,
@@ -312,7 +303,6 @@ fn css_entry_not_triggered_with_insufficient_samples() {
         hystart.on_packets_acked(
             10 * SMSS,
             usize::MAX,
-            0,
             SMSS,
             &RttEstimate::new(Duration::from_millis(120)),
             SMSS,
@@ -418,7 +408,6 @@ fn css_growth_rate_is_one_quarter() {
     let result = hystart.on_packets_acked(
         10 * SMSS,
         usize::MAX,
-        0,
         4 * SMSS, // new_acked = 4 * SMSS
         &RttEstimate::new(Duration::from_millis(120)),
         SMSS,
@@ -431,51 +420,6 @@ fn css_growth_rate_is_one_quarter() {
         4 * SMSS / HyStart::CSS_GROWTH_DIVISOR,
         "CSS growth should be 1/{} of new_acked",
         HyStart::CSS_GROWTH_DIVISOR
-    );
-}
-
-#[test]
-fn css_growth_no_byte_accumulation() {
-    let mut hystart = make_hystart_paced();
-    maybe_enter_css(
-        &mut hystart,
-        Duration::from_millis(100),
-        Duration::from_millis(120),
-    );
-    assert!(hystart.in_css(), "Should have entered CSS");
-
-    // First ACK with 100 bytes
-    let result1 = hystart.on_packets_acked(
-        10 * SMSS,
-        usize::MAX,
-        0, // acked_bytes starts at 0
-        100,
-        &RttEstimate::new(Duration::from_millis(120)),
-        SMSS,
-        10,
-    );
-
-    // cwnd_increase = 100 / CSS_GROWTH_DIVISOR
-    let expected = 100 / HyStart::CSS_GROWTH_DIVISOR;
-    assert_eq!(result1.cwnd_increase, expected);
-    assert_eq!(result1.unused_acked_bytes, 100 - expected);
-
-    // Second ACK with 100 bytes (passing unused_acked_bytes)
-    // AFTER FIX: unused bytes should NOT accumulate in CSS
-    let result2 = hystart.on_packets_acked(
-        10 * SMSS,
-        usize::MAX,
-        result1.unused_acked_bytes, // Carried over
-        100,
-        &RttEstimate::new(Duration::from_millis(120)),
-        SMSS,
-        11,
-    );
-
-    // Should use only new_acked, not accumulated
-    assert_eq!(
-        result2.cwnd_increase, expected,
-        "Bytes should not accumulate in CSS"
     );
 }
 
@@ -505,7 +449,6 @@ fn css_exit_after_n_rounds() {
             hystart.on_packets_acked(
                 10 * SMSS,
                 usize::MAX,
-                0,
                 SMSS,
                 &RttEstimate::new(Duration::from_millis(120)),
                 SMSS,
@@ -517,7 +460,6 @@ fn css_exit_after_n_rounds() {
         let result = hystart.on_packets_acked(
             10 * SMSS,
             usize::MAX,
-            0,
             SMSS,
             &RttEstimate::new(Duration::from_millis(120)),
             SMSS,
@@ -564,7 +506,6 @@ fn css_back_to_slow_start_on_rtt_decrease() {
         hystart.on_packets_acked(
             10 * SMSS,
             usize::MAX,
-            0,
             SMSS,
             &RttEstimate::new(Duration::from_millis(110)),
             SMSS,
@@ -597,7 +538,6 @@ fn css_exit_to_slow_start_restores_normal_growth() {
     let css_result = hystart.on_packets_acked(
         10 * SMSS,
         usize::MAX,
-        0,
         4 * SMSS,
         &RttEstimate::new(Duration::from_millis(120)),
         SMSS,
@@ -617,7 +557,6 @@ fn css_exit_to_slow_start_restores_normal_growth() {
         hystart.on_packets_acked(
             10 * SMSS,
             usize::MAX,
-            0,
             SMSS,
             &RttEstimate::new(Duration::from_millis(110)),
             SMSS,
@@ -631,7 +570,6 @@ fn css_exit_to_slow_start_restores_normal_growth() {
     let ss_result = hystart.on_packets_acked(
         10 * SMSS,
         usize::MAX,
-        0,
         4 * SMSS,
         &RttEstimate::new(Duration::from_millis(110)),
         SMSS,
@@ -657,7 +595,6 @@ fn l_limit_paced_no_cap() {
     let result = hystart.on_packets_acked(
         10 * SMSS,
         usize::MAX,
-        0,
         100 * SMSS,
         &RttEstimate::new(Duration::from_millis(100)),
         SMSS,
@@ -676,7 +613,6 @@ fn l_limit_unpaced_capped_at_l_smss() {
     let result = hystart.on_packets_acked(
         10 * SMSS,
         usize::MAX,
-        0,
         100 * SMSS,
         &RttEstimate::new(Duration::from_millis(100)),
         SMSS,
@@ -704,7 +640,6 @@ fn initial_ss_restriction_falls_back_when_ssthresh_set() {
     let _result1 = hystart.on_packets_acked(
         10 * SMSS,
         usize::MAX,
-        0,
         SMSS,
         &RttEstimate::new(Duration::from_millis(100)),
         SMSS,
@@ -718,7 +653,6 @@ fn initial_ss_restriction_falls_back_when_ssthresh_set() {
     let result2 = hystart.on_packets_acked(
         10 * SMSS,
         20 * SMSS, // ssthresh set
-        0,
         SMSS,
         &RttEstimate::new(Duration::from_millis(100)),
         SMSS,
@@ -732,7 +666,6 @@ fn initial_ss_restriction_falls_back_when_ssthresh_set() {
     let result3 = hystart.on_packets_acked(
         19 * SMSS,
         20 * SMSS,
-        0,
         2 * SMSS,
         &RttEstimate::new(Duration::from_millis(100)),
         SMSS,

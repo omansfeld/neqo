@@ -38,7 +38,6 @@ impl SlowStart for ClassicSlowStart {
         &mut self,
         curr_cwnd: usize,
         ssthresh: usize,
-        acked_bytes: usize,
         new_acked: usize,
         _rtt_est: &RttEstimate,
         _max_datagram_size: usize,
@@ -49,16 +48,16 @@ impl SlowStart for ClassicSlowStart {
             "ssthresh {ssthresh} < curr_cwnd {curr_cwnd} while in slow start --> invalid state"
         );
 
-        let cwnd_increase = min(ssthresh - curr_cwnd, acked_bytes + new_acked);
-        let unused_acked_bytes = acked_bytes + new_acked - cwnd_increase;
+        // After persistent congestion we already have an established `ssthresh`, so we only grow
+        // `cwnd` up to it.
+        let cwnd_increase = min(ssthresh - curr_cwnd, new_acked);
 
-        // This doesn't look like it is necessary, but it can happen
-        // after persistent congestion.
+        // This is only true if we come here after persistent congestion and have reached the
+        // established `ssthresh`.
         let exit_slow_start = curr_cwnd + cwnd_increase == ssthresh;
 
         SlowStartResult {
             cwnd_increase,
-            unused_acked_bytes,
             exit_slow_start,
         }
     }

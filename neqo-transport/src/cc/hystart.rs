@@ -90,24 +90,18 @@ impl HyStart {
         self.current.css_round_count >= Self::CSS_ROUNDS
     }
 
-    fn calc_cwnd_increase(
-        &self,
-        acked_bytes: usize,
-        new_acked: usize,
-        max_datagram_size: usize,
-        css: bool,
-    ) -> (usize, usize) {
+    fn calc_cwnd_increase(&self, new_acked: usize, max_datagram_size: usize, css: bool) -> usize {
         let mut cwnd_increase = min(
             self.limit
                 .checked_mul(max_datagram_size)
                 .unwrap_or(usize::MAX),
-            acked_bytes + new_acked,
+            new_acked,
         );
 
         if css {
             cwnd_increase /= Self::CSS_GROWTH_DIVISOR;
         }
-        (cwnd_increase, acked_bytes + new_acked - cwnd_increase)
+        cwnd_increase
     }
 
     const fn enough_samples(&self) -> bool {
@@ -159,7 +153,6 @@ impl SlowStart for HyStart {
         &mut self,
         curr_cwnd: usize,
         ssthresh: usize,
-        acked_bytes: usize,
         new_acked: usize,
         rtt_est: &RttEstimate,
         max_datagram_size: usize,
@@ -170,13 +163,23 @@ impl SlowStart for HyStart {
             "ssthresh {ssthresh} < curr_cwnd {curr_cwnd} while in slow start --> invalid state"
         );
 
-        eprintln!("DEBUG: on_packets_acked: pn={}, rtt={:?}, samples={}, in_css={}, window_end={:?}",
-                  largest_acked, rtt_est.latest(), self.current.rtt_sample_count, self.in_css(), self.current.window_end);
+        eprintln!(
+            "DEBUG: on_packets_acked: pn={}, rtt={:?}, samples={}, in_css={}, window_end={:?}",
+            largest_acked,
+            rtt_est.latest(),
+            self.current.rtt_sample_count,
+            self.in_css(),
+            self.current.window_end
+        );
 
         self.collect_rtt_sample(rtt_est.latest());
 
-        eprintln!("DEBUG: After collect: samples={}, cur_min={:?}, last_min={:?}",
-                  self.current.rtt_sample_count, self.current.current_round_min_rtt, self.current.last_round_min_rtt);
+        eprintln!(
+            "DEBUG: After collect: samples={}, cur_min={:?}, last_min={:?}",
+            self.current.rtt_sample_count,
+            self.current.current_round_min_rtt,
+            self.current.last_round_min_rtt
+        );
 
         if self.in_css()
             && self.enough_samples()
@@ -200,10 +203,16 @@ impl SlowStart for HyStart {
                 ),
             );
 
-            eprintln!("DEBUG: CSS check: thresh={:?}, cur={:?}, last={:?}, diff={:?}, need={:?}",
-                      rtt_thresh, self.current.current_round_min_rtt, self.current.last_round_min_rtt,
-                      self.current.current_round_min_rtt.saturating_sub(self.current.last_round_min_rtt),
-                      self.current.last_round_min_rtt + rtt_thresh);
+            eprintln!(
+                "DEBUG: CSS check: thresh={:?}, cur={:?}, last={:?}, diff={:?}, need={:?}",
+                rtt_thresh,
+                self.current.current_round_min_rtt,
+                self.current.last_round_min_rtt,
+                self.current
+                    .current_round_min_rtt
+                    .saturating_sub(self.current.last_round_min_rtt),
+                self.current.last_round_min_rtt + rtt_thresh
+            );
 
             if self.current.current_round_min_rtt >= self.current.last_round_min_rtt + rtt_thresh {
                 self.current.css_baseline_min_rtt = self.current.current_round_min_rtt;
@@ -213,20 +222,25 @@ impl SlowStart for HyStart {
                 eprintln!("DEBUG: Did NOT enter CSS (RTT increase insufficient)");
             }
         } else {
-            eprintln!("DEBUG: Skip CSS check: in_css={}, enough={}, cur!=MAX={}, last!=MAX={}",
-                      self.in_css(), self.enough_samples(),
-                      self.current.current_round_min_rtt != Duration::MAX,
-                      self.current.last_round_min_rtt != Duration::MAX);
+            eprintln!(
+                "DEBUG: Skip CSS check: in_css={}, enough={}, cur!=MAX={}, last!=MAX={}",
+                self.in_css(),
+                self.enough_samples(),
+                self.current.current_round_min_rtt != Duration::MAX,
+                self.current.last_round_min_rtt != Duration::MAX
+            );
         }
 
         let mut exit_slow_start = false;
-        let (cwnd_increase, unused_acked_bytes) =
-            self.calc_cwnd_increase(acked_bytes, new_acked, max_datagram_size, self.in_css());
+        let cwnd_increase = self.calc_cwnd_increase(new_acked, max_datagram_size, self.in_css());
 
         // check for end of round
         if let Some(window_end) = self.current.window_end {
             if largest_acked >= window_end {
-                eprintln!("DEBUG: Round ended: largest_acked={} >= window_end={}", largest_acked, window_end);
+                eprintln!(
+                    "DEBUG: Round ended: largest_acked={} >= window_end={}",
+                    largest_acked, window_end
+                );
                 self.current.window_end = None;
 
                 if self.in_css() {
@@ -237,7 +251,6 @@ impl SlowStart for HyStart {
 
         SlowStartResult {
             cwnd_increase,
-            unused_acked_bytes,
             exit_slow_start,
         }
     }

@@ -109,7 +109,6 @@ pub trait WindowAdjustment: Display + Debug {
 
 pub struct SlowStartResult {
     pub cwnd_increase: usize,
-    pub unused_acked_bytes: usize,
     pub exit_slow_start: bool,
 }
 
@@ -121,12 +120,11 @@ pub trait SlowStart: Display + Debug {
     fn on_packet_sent(&mut self, sent_pn: packet::Number);
     /// Handle packets being acknowledged during slow start.
     ///
-    /// Returns (`cwnd_increase`, `unused_acked_bytes`, `exit_slow_start`)
+    /// Returns (`cwnd_increase`, `exit_slow_start`)
     fn on_packets_acked(
         &mut self,
         curr_cwnd: usize,
         ssthresh: usize,
-        acked_bytes: usize,
         new_acked: usize,
         rtt_est: &RttEstimate,
         max_datagram_size: usize,
@@ -307,14 +305,12 @@ where
             let result = self.ss_algorithm.on_packets_acked(
                 self.current.congestion_window,
                 self.current.ssthresh,
-                self.current.acked_bytes,
                 new_acked,
                 rtt_est,
                 self.max_datagram_size(),
                 largest_packet_acked.pn(),
             );
             self.current.congestion_window += result.cwnd_increase;
-            self.current.acked_bytes = result.unused_acked_bytes;
             qdebug!("[{self}] slow start += {}", result.cwnd_increase);
             if result.exit_slow_start {
                 qinfo!("Exited slow start by algorithm");
