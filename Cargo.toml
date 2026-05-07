@@ -33,10 +33,10 @@ cfg_aliases = { version = "0.2", default-features = false }
 enum-map = { version = "2.7", default-features = false }
 enumset = { version = "1.1", default-features = false }
 hex = { version = "0.4", default-features = false }
-http = { version = "1", default-features = false, features = ["std"] }
+http = { version = "0.2.9", default-features = false }
 libc = { version = "0.2", default-features = false }
 log = { version = "0.4", default-features = false }
-nss = { rev = "0.8.0", package = "nss-rs", git = "https://github.com/mozilla/nss-rs" }
+nss = { rev = "c54949bbff92795b8b2e837ec84decc9b468081a", package = "nss-rs", git = "https://github.com/mozilla/nss-rs" }
 qlog = { version = "0.16.0", default-features = false }
 quinn-udp = { version = "0.6", default-features = false, features = ["log", "fast-apple-datapath"] }
 rustc-hash = { version = "2.1", default-features = false, features = [ "std" ]}
